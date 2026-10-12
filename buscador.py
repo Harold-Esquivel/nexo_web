@@ -4,6 +4,8 @@ Instalar: pip install customtkinter ddgs requests beautifulsoup4 yfinance pandas
 Ejecutar: python buscador_app_mejorado.py
 """
 import json
+import os
+import ipaddress
 from urllib.parse import quote_plus, urlparse
 import math
 import queue
@@ -66,8 +68,17 @@ def distancia(a, b):
 def descargar(url):
     if not isinstance(url, str) or not url.startswith(("http://", "https://")):
         return None
+    host = (urlparse(url).hostname or '').lower()
+    if not host or host in ('localhost',) or host.endswith(('.localhost', '.local', '.internal')):
+        return None
     try:
-        r = requests.get(url, headers=HEADERS, timeout=9)
+        ip = ipaddress.ip_address(host)
+        if not ip.is_global:
+            return None
+    except ValueError:
+        pass
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=(2.5, 4.5), allow_redirects=False)
         if r.ok and "html" in r.headers.get("content-type", "").lower():
             return r.text[:1_500_000]
     except requests.RequestException:
@@ -94,7 +105,7 @@ def objetos_jsonld(soup):
 
 def resultados_web(texto, limite):
     """DDGS devuelve hasta un máximo solicitado, sujeto a su motor y bloqueos."""
-    with DDGS() as ddg:
+    with DDGS(timeout=7) as ddg:
         encontrados = list(ddg.text(texto, region="pe-es", max_results=limite) or [])
     usados, lista = set(), []
     for r in encontrados:
@@ -163,7 +174,7 @@ def busqueda_multisitio(entrada, lugar, limite, tipo="productos"):
             return resultados_web(q[0], q[1])
         except Exception:
             return []
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=6) as ex:
         grupos = list(ex.map(ejecutar, fuentes))
     # Intercalar páginas comunes con dominios específicos da visibilidad a más tiendas.
     encontrados = []
@@ -191,8 +202,16 @@ def busqueda_multisitio(entrada, lugar, limite, tipo="productos"):
 def buscar_productos(entrada, alcance, limite, tasa):
     zona = "Arequipa" if alcance == "Arequipa" else "Perú"
     items = busqueda_multisitio(entrada, zona, limite, "productos")
+    # Evita 50-100 descargas HTTP en una sola consulta. Los demás
+    # resultados conservan título, resumen y vínculo verificables.
+    max_detalles = max(0, min(12, int(os.getenv('NEXO_MAX_DETALLES', '12'))))
+    con_detalle = items[:max_detalles]
+    sin_detalle = items[max_detalles:]
     with ThreadPoolExecutor(max_workers=6) as pool:
-        return list(pool.map(lambda x: analizar_producto(x, tasa), items))
+        primeros = list(pool.map(lambda x: analizar_producto(x, tasa), con_detalle))
+    vacios = [dict(x, precio=None, precio_pen=None, moneda='', calificacion=None, resenas=None)
+              for x in sin_detalle]
+    return primeros + vacios
 
 
 def datos_empresa(item):
@@ -223,7 +242,7 @@ def buscar_empresas(entrada, alcance, limite):
     lugar = "Arequipa" if alcance == "Arequipa" else "Perú"
     registros = []
     try:
-        with DDGS() as ddg:
+        with DDGS(timeout=7) as ddg:
             registros = list(ddg.maps(entrada, place=f"{lugar}, Peru", max_results=min(limite, 50)) or [])
     except Exception:
         pass
@@ -242,8 +261,12 @@ def buscar_empresas(entrada, alcance, limite):
                       "calificacion": numero(r.get("rating")), "km": round(distancia(AREQUIPA,(lat,lon)), 1)
                       if lat is not None and lon is not None else None})
     enlaces = busqueda_multisitio(entrada, lugar, limite, "empresas")
+    max_detalles = max(0, min(12, int(os.getenv('NEXO_MAX_DETALLES', '12'))))
     with ThreadPoolExecutor(max_workers=5) as pool:
-        otros = list(pool.map(datos_empresa, enlaces))
+        primeros = list(pool.map(datos_empresa, enlaces[:max_detalles]))
+    restantes = [dict(x, direccion='', telefono='', correos=[], encargado='', calificacion=None, km=None)
+                for x in enlaces[max_detalles:]]
+    otros = primeros + restantes
     # Mantener tanto fichas de mapas como perfiles de Facebook y otros portales.
     combinados = []
     for pos in range(max(len(datos), len(otros))):

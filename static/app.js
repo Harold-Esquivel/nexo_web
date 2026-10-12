@@ -16,7 +16,89 @@ function itemCard(x, idx){if(state.tab==='productos'){const link=urlSafe(x.link)
 if(state.tab==='empresas'){const link=urlSafe(x.link);return `<article class="item" tabindex="0" role="button" data-detalle="${idx}" aria-label="Ver más detalles"><div class="item-top"><span class="tag">EMPRESA</span>${x.calificacion!=null?`<span class="score flat">★ ${format(x.calificacion)}</span>`:''}</div><h4>${escapeHtml(x.titulo||'Empresa')}</h4><p>📍 ${escapeHtml(x.direccion||'Dirección no disponible')}</p><p>☎ ${escapeHtml(x.telefono||'Teléfono no disponible')}</p>${x.km!=null?`<p>Distancia aproximada desde el centro de Arequipa: ${format(x.km)} km</p>`:''}${x.correos?.length?`<p>✉ ${escapeHtml(x.correos.join(', '))}</p>`:''}${link?`<a class="item-link" href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">Sitio web ↗</a>`:''}</article>`}
 const score=x.tendencia==='Posible subida'?'up':x.tendencia==='Posible bajada'?'down':'flat';const reasons=(x.razones||[]).slice(0,4).map(z=>escapeHtml(z)).join(' · ');return `<article class="item" tabindex="0" role="button" data-detalle="${idx}" aria-label="Ver más detalles"><div class="item-top"><span class="tag">${escapeHtml(x.ticker||'ACCIÓN')}</span><span class="score ${score}">${escapeHtml(x.tendencia||'Sin señal clara')}</span></div><h4>${escapeHtml(x.empresa||x.ticker)}</h4><div class="price">${format(x.precio)} <span style="font-size:12px;color:#95a1b4">${escapeHtml(x.moneda||'')}</span></div><p>Señal técnica: ${escapeHtml(x.puntuacion)} puntos · RSI: ${format(x.rsi)}</p><p>Variación 20 sesiones: ${x.momento!=null?format(x.momento)+'%':'Sin dato'}${x.potencial!=null?' · Potencial según objetivo de analistas: '+format(x.potencial)+'%':''}</p><div class="reason">${reasons||'Indicadores insuficientes.'}</div></article>`}
 function render(){let d=[...state.data],ord=$('#orden').value;if(state.tab==='acciones'){if(state.signal==='subida')d=d.filter(x=>x.tendencia==='Posible subida');if(state.signal==='bajada')d=d.filter(x=>x.tendencia==='Posible bajada');if(state.signal==='neutra')d=d.filter(x=>x.tendencia==='Sin señal clara');d.sort((a,b)=>ord==='Señal más bajista'?a.puntuacion-b.puntuacion:ord==='Nombre A-Z'?String(a.empresa).localeCompare(String(b.empresa)):b.puntuacion-a.puntuacion)}else if(state.tab==='productos'){d.sort((a,b)=>ord==='Nombre A-Z'?String(a.titulo).localeCompare(String(b.titulo)):ord==='Más recomendable'?(b.calificacion??-1)-(a.calificacion??-1):(a.precio_pen??Number.POSITIVE_INFINITY)-(b.precio_pen??Number.POSITIVE_INFINITY))}else{d.sort((a,b)=>ord==='Nombre A-Z'?String(a.titulo).localeCompare(String(b.titulo)):ord==='Mejor valoradas'?(b.calificacion??-1)-(a.calificacion??-1):(a.km??Infinity)-(b.km??Infinity))}state.visible=d;const max=Math.max(1,Math.ceil(d.length/10));state.page=Math.min(state.page,max-1);$('#resultNum').textContent=d.length;$('#contador').textContent=d.length?`${d.length} resultados`:'Listo para explorar';if(!d.length){$('#resultados').innerHTML=`<div class="empty"><div class="empty-illustration">✳</div><b>${state.data.length?'No hay resultados con este filtro':'Las mejores búsquedas comienzan aquí'}</b><p>${state.data.length?'Prueba con otro filtro.':'Introduce una búsqueda para encontrar opciones.'}</p></div>`}else{$('#resultados').innerHTML=d.slice(state.page*10,(state.page+1)*10).map((x,i)=>itemCard(x,state.page*10+i)).join('')}$('#paginacion').hidden=max<=1;$('#paginas').textContent=`Página ${state.page+1} de ${max}`;$('#anterior').disabled=state.page===0;$('#siguiente').disabled=state.page+1>=max;}
-$('#form').addEventListener('submit',async e=>{e.preventDefault();if(state.loading)return;const query=$('#consulta').value.trim();if(!query&&!(state.tab==='acciones'&&$('#modo').value==='Ranking global')){$('#estado').textContent='Escribe qué deseas buscar.';$('#consulta').focus();return}state.loading=true;const token=++state.token;$('#buscar').disabled=true;$('#buscar span:first-child').textContent='Buscando…';$('#estado').textContent='Consultando fuentes externas. Puede tomar unos segundos.';$('#resultados').innerHTML='<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';$('#paginacion').hidden=true;try{const response=await fetch('/api/buscar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({categoria:state.tab,consulta:query,zona:$('#zona').value,modo:$('#modo').value,limite:$('#limite').value})});const json=await response.json();if(token!==state.token)return;if(!response.ok)throw Error(json.error||'No se pudo consultar.');state.data=json.resultados||[];state.page=0;$('#estado').textContent=`Se encontraron ${state.data.length} resultados. La disponibilidad depende del buscador externo.`;render()}catch(err){if(token!==state.token)return;state.data=[];render();$('#estado').textContent=err.message||'Error inesperado.'}finally{if(token===state.token){state.loading=false;$('#buscar').disabled=false;$('#buscar span:first-child').textContent='Buscar'}}});
+// Algunas plataformas devuelven HTML (502/503/504) o cuerpo vacío.
+// Nunca asumimos que cualquier respuesta HTTP contiene JSON válido.
+async function pedirJson(url, options = {}) {
+  let response;
+  try {
+    response = await fetch(url, {cache:'no-store', ...options});
+  } catch (_) {
+    throw new Error('No se pudo contactar al servidor. Comprueba tu conexión y el estado del servicio en Render.');
+  }
+  const raw = await response.text();
+  let data = null;
+  try { if (raw.trim()) data = JSON.parse(raw); } catch (_) { /* HTTP del alojamiento, no JSON */ }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    if ([502,503,504,524].includes(response.status) || response.status >= 500) {
+      throw new Error('El servidor se detuvo o demoró demasiado (HTTP '+response.status+'). Revisa los Logs en Render y vuelve a intentar.');
+    }
+    if (response.status === 404) {
+      throw new Error('No se encontró la API. Confirma que Render está ejecutando la última versión del proyecto.');
+    }
+    throw new Error('El servidor devolvió una respuesta vacía o que no es JSON (HTTP '+response.status+'). Consulta los Logs en Render.');
+  }
+  if (!response.ok) throw new Error(data.error || 'Error HTTP '+response.status+'.');
+  return data;
+}
+
+async function esperarBusqueda(jobId, token) {
+  const deadline = Date.now() + 145000;
+  while (Date.now() < deadline) {
+    if (token !== state.token) return null;
+    await new Promise(resolve => setTimeout(resolve, 1800));
+    if (token !== state.token) return null;
+    const datos = await pedirJson('/api/trabajo/' + encodeURIComponent(jobId));
+    if (datos.estado === 'terminado') return datos;
+    if (datos.estado === 'error') throw new Error(datos.error || 'La búsqueda no pudo completarse.');
+    $('#estado').textContent = 'Buscando entre tiendas y fuentes públicas… Puedes seguir esperando; algunas páginas tardan en responder.';
+  }
+  throw new Error('La búsqueda está tardando demasiado. Prueba con 20 resultados o revisa los Logs en Render.');
+}
+
+$('#form').addEventListener('submit', async e => {
+  e.preventDefault();
+  if (state.loading) return;
+  const consulta = $('#consulta').value.trim();
+  if (!consulta && !(state.tab === 'acciones' && $('#modo').value === 'Ranking global')) {
+    $('#estado').textContent = 'Escribe qué deseas buscar.';
+    $('#consulta').focus();
+    return;
+  }
+  state.loading = true;
+  const token = ++state.token;
+  $('#buscar').disabled = true;
+  $('#buscar span:first-child').textContent = 'Buscando…';
+  $('#estado').textContent = 'Iniciando la búsqueda en el servidor…';
+  $('#resultados').innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+  $('#paginacion').hidden = true;
+  const payload = {categoria:state.tab, consulta, zona:$('#zona').value,
+                   modo:$('#modo').value, limite:$('#limite').value};
+  try {
+    let data = await pedirJson('/api/buscar', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+    });
+    if (token !== state.token) return;
+    if (data.trabajo) data = await esperarBusqueda(data.trabajo, token);
+    if (!data || token !== state.token) return;
+    state.data = Array.isArray(data.resultados) ? data.resultados : [];
+    state.page = 0;
+    render();
+    $('#estado').textContent = state.data.length
+      ? `Se encontraron ${state.data.length} resultados. Los datos dependen de proveedores externos.`
+      : 'No se encontraron resultados. Prueba con otro nombre o menos filtros; algunas páginas limitan el acceso.';
+  } catch (err) {
+    if (token !== state.token) return;
+    state.data = [];
+    render();
+    $('#estado').textContent = err.message || 'No se pudo completar la consulta.';
+  } finally {
+    if (token === state.token) {
+      state.loading = false;
+      $('#buscar').disabled = false;
+      $('#buscar span:first-child').textContent = 'Buscar';
+    }
+  }
+});
 tabChange('productos');
 
 // Panel de detalle: se abre con toque o Enter y conserva enlaces externos seguros.
