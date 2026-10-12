@@ -4,6 +4,7 @@ Instalar: pip install customtkinter ddgs requests beautifulsoup4 yfinance pandas
 Ejecutar: python buscador_app_mejorado.py
 """
 import json
+from urllib.parse import quote_plus, urlparse
 import math
 import queue
 import re
@@ -145,9 +146,51 @@ def analizar_producto(item, tasa):
     return base
 
 
+def busqueda_multisitio(entrada, lugar, limite, tipo="productos"):
+    """Combina resultados orgánicos y búsquedas por dominio sin inventar fichas."""
+    if tipo == "productos":
+        dominios = ["mercadolibre.com.pe", "facebook.com/marketplace", "g2a.com", "eneba.com",
+                    "amazon.com", "falabella.com.pe", "ripley.com.pe", "coolbox.pe"]
+        consulta = f"{entrada} comprar precio {lugar}"
+    else:
+        dominios = ["facebook.com", "instagram.com", "linkedin.com", "paginasamarillas.com.pe"]
+        consulta = f"{entrada} {lugar} empresa contacto"
+    fuentes = [(consulta, max(15, min(limite, 40)))]
+    # Se consultan dominios de forma independiente para evitar que el ranking general los oculte.
+    fuentes += [(f"site:{dom} {entrada} {lugar if tipo == 'empresas' else ''}", 8) for dom in dominios]
+    def ejecutar(q):
+        try:
+            return resultados_web(q[0], q[1])
+        except Exception:
+            return []
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        grupos = list(ex.map(ejecutar, fuentes))
+    # Intercalar páginas comunes con dominios específicos da visibilidad a más tiendas.
+    encontrados = []
+    for pos in range(max((len(g) for g in grupos), default=0)):
+        for grupo in grupos:
+            if pos < len(grupo):
+                encontrados.append(grupo[pos])
+    usados, lista = set(), []
+    for item in encontrados:
+        link = item.get('link','')
+        if not link.startswith(('https://','http://')):
+            continue
+        norm = link.split('#')[0].rstrip('/')
+        if norm in usados:
+            continue
+        usados.add(norm)
+        item['fuente'] = urlparse(link).netloc.removeprefix('www.')
+        item['confirmado'] = True
+        lista.append(item)
+        if len(lista) >= limite:
+            break
+    return lista
+
+
 def buscar_productos(entrada, alcance, limite, tasa):
     zona = "Arequipa" if alcance == "Arequipa" else "Perú"
-    items = resultados_web(f"{entrada} comprar precio {zona}", limite)
+    items = busqueda_multisitio(entrada, zona, limite, "productos")
     with ThreadPoolExecutor(max_workers=6) as pool:
         return list(pool.map(lambda x: analizar_producto(x, tasa), items))
 
@@ -181,27 +224,32 @@ def buscar_empresas(entrada, alcance, limite):
     registros = []
     try:
         with DDGS() as ddg:
-            registros = list(ddg.maps(entrada, place=f"{lugar}, Peru", max_results=min(limite, 100)) or [])
+            registros = list(ddg.maps(entrada, place=f"{lugar}, Peru", max_results=min(limite, 50)) or [])
     except Exception:
         pass
-    if registros:
-        usados = set()
-        datos = []
-        for r in registros:
-            enlace = r.get("url") or r.get("website") or ""
-            clave = (r.get("title", "").casefold(), r.get("address", ""))
-            if clave in usados:
-                continue
-            usados.add(clave)
-            lat, lon = numero(r.get("latitude")), numero(r.get("longitude"))
-            datos.append({"titulo": r.get("title") or "Empresa", "link": enlace, "resumen": r.get("description", ""),
-                          "direccion": r.get("address") or "", "telefono": r.get("phone") or "",
-                          "correos": [], "encargado": "", "calificacion": numero(r.get("rating")),
-                          "km": round(distancia(AREQUIPA, (lat, lon)), 1) if lat is not None and lon is not None else None})
-        return datos
-    items = resultados_web(f"{entrada} empresas {lugar} telefono dirección web", limite)
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        return list(pool.map(datos_empresa, items))
+    datos = []
+    usados = set()
+    for r in registros:
+        enlace = r.get("url") or r.get("website") or ""
+        clave = (r.get("title", "").casefold(), r.get("address", ""))
+        if clave in usados:
+            continue
+        usados.add(clave)
+        lat, lon = numero(r.get("latitude")), numero(r.get("longitude"))
+        datos.append({"titulo": r.get("title") or "Empresa", "link": enlace, "fuente": "Mapa",
+                      "resumen": r.get("description", ""), "direccion": r.get("address") or "",
+                      "telefono": r.get("phone") or "", "correos": [], "encargado": "",
+                      "calificacion": numero(r.get("rating")), "km": round(distancia(AREQUIPA,(lat,lon)), 1)
+                      if lat is not None and lon is not None else None})
+    enlaces = busqueda_multisitio(entrada, lugar, limite, "empresas")
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        otros = list(pool.map(datos_empresa, enlaces))
+    # Mantener tanto fichas de mapas como perfiles de Facebook y otros portales.
+    combinados = []
+    for pos in range(max(len(datos), len(otros))):
+        if pos < len(datos): combinados.append(datos[pos])
+        if pos < len(otros): combinados.append(otros[pos])
+    return combinados[:limite]
 
 
 def rsi_14(cierre):
@@ -270,7 +318,15 @@ def analizar_accion(simbolo):
                 "moneda": info.get("currency") or "moneda del mercado", "precio": actual,
                 "puntuacion": puntuacion, "tendencia": tendencia, "rsi": rsi,
                 "momento": cambio20, "ma20": ma20, "ma50": ma50, "objetivo": objetivo,
-                "potencial": potencial, "analistas": info.get("numberOfAnalystOpinions"), "razones": razones}
+                "potencial": potencial, "analistas": info.get("numberOfAnalystOpinions"), "razones": razones,
+                "sector": info.get("sector"), "industria": info.get("industry"),
+                "pais": info.get("country"), "sitio": info.get("website"),
+                "capitalizacion": numero(info.get("marketCap")),
+                "pe": numero(info.get("trailingPE")),
+                "max52": numero(info.get("fiftyTwoWeekHigh")), "min52": numero(info.get("fiftyTwoWeekLow")),
+                "dividendo": numero(info.get("dividendYield")),
+                "resumen_empresa": str(info.get("longBusinessSummary") or "")[:1200],
+                "historial": [{"fecha":str(fecha.date()), "cierre":round(float(valor),4)} for fecha,valor in cierre.tail(60).items()]}
     except Exception:
         return None
 

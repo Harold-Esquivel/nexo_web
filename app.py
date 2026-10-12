@@ -4,7 +4,7 @@ import re
 import time
 import threading
 from flask import Flask, render_template, request, jsonify
-from buscador import buscar_productos, buscar_empresas, buscar_acciones
+from buscador import buscar_productos, buscar_empresas, buscar_acciones, analizar_accion
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
@@ -18,6 +18,19 @@ def inicio():
 @app.get('/api/health')
 def health():
     return jsonify(status='ok')
+
+@app.get('/api/accion/<simbolo>')
+def detalle_accion(simbolo):
+    if not re.fullmatch(r'[A-Za-z0-9.\-^=]{1,15}', simbolo):
+        return jsonify(error='Símbolo no válido.'), 400
+    try:
+        resultado = analizar_accion(simbolo.upper())
+        if not resultado:
+            return jsonify(error='No se encontraron datos suficientes.'), 404
+        return jsonify(resultado)
+    except Exception:
+        app.logger.exception('Error de detalle')
+        return jsonify(error='No se pudo consultar el detalle.'), 502
 
 @app.post('/api/buscar')
 def buscar():
